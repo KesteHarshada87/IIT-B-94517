@@ -6,73 +6,65 @@ from dotenv import load_dotenv
 import os
 import json
 import requests
-from datetime import datetime
 
 load_dotenv()
+st.set_page_config(page_title="LangChain Agent with Tools", layout="centered")
+st.title("🧠 LangChain Agent with Tools (File Upload Enabled)")
 
-def log_event(event: str):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    if "logs" not in st.session_state:
-        st.session_state.logs = []
-    st.session_state.logs.append(f"[{timestamp}] {event}")
+uploaded_file = st.file_uploader(
+    "Upload a text file",
+    type=["txt"]
+)
+
+uploaded_text = ""
+
+if uploaded_file is not None:
+    uploaded_text = uploaded_file.read().decode("utf-8")
+    st.success(f"File '{uploaded_file.name}' uploaded successfully")
 
 @tool
 def calculator(expression: str) -> str:
-    """
-    Solves arithmetic expressions safely.
-    """
-    log_event(f"Calculator called with: {expression}")
+    """Evaluates a basic arithmetic expression."""
     try:
-        result = eval(expression, {"__builtins__": None}, {})
-        return str(result)
-    except Exception as e:
-        return f"Error: {str(e)}"
+        return str(eval(expression))
+    except Exception:
+        return "Error: Invalid expression"
+
 
 @tool
-def read_file(filepath: str) -> str:
+def read_uploaded_file(_: str = "") -> str:
     """
-    Reads a text file and returns its contents as a string.
+    Reads content of the uploaded file from Streamlit uploader.
     """
-    log_event(f"File reader called with: {filepath}")
-    try:
-        with open(filepath, "r") as f:
-            return f.read()
-    except Exception as e:
-        return f"Error: Cannot read file ({str(e)})"
+    if uploaded_text:
+        return uploaded_text
+    return "Error: No file uploaded"
+
 
 @tool
-def get_weather(city: str) -> str:
-    """
-    Fetches current weather information for a given city using OpenWeather API.
-    """
-    log_event(f"Weather tool called for city: {city}")
-    api_key = os.getenv("OPENWEATHER_API_KEY")
-    if not api_key:
-        return "Error: OPENWEATHER_API_KEY not set"
-
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
-
+def current_weather(city: str) -> str:
+    """Gets current weather of a city."""
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            return f"Error: City not found or API error ({response.status_code})"
-        data = response.json()
-        return json.dumps(data, indent=2)
-    except Exception as e:
-        return f"Error: Could not fetch weather ({str(e)})"
+        api_key = os.getenv("OPENWEATHER_API_KEY")
+        url = (
+            f"https://api.openweathermap.org/data/2.5/weather"
+            f"?appid={api_key}&units=metric&q={city}"
+        )
+        response = requests.get(url)
+        return json.dumps(response.json())
+    except Exception:
+        return "Error: Weather not found"
+
 
 @tool
-def knowledge_lookup(query: str) -> str:
-    """
-    Provides answers to general knowledge questions using the LLM.
-    """
-    log_event(f"Knowledge lookup called with: {query}")
-    return f"Searching knowledge for: {query}"
-
-# ---------------- STREAMLIT UI ----------------
-
-st.set_page_config(page_title="Agent with Tools", layout="wide")
-st.title("🤖 LangChain Agent with Tools (Streamlit)")
+def knowledge_lookup(topic: str) -> str:
+    """Returns short knowledge about a topic."""
+    knowledge = {
+        "langchain": "LangChain is a framework for building LLM-powered apps.",
+        "agent": "An agent decides which tool to use based on user input.",
+        "llm": "LLM stands for Large Language Model."
+    }
+    return knowledge.get(topic.lower(), "No knowledge available")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -80,64 +72,60 @@ if "messages" not in st.session_state:
 if "logs" not in st.session_state:
     st.session_state.logs = []
 
-# ---------------- MODEL ----------------
-
 llm = init_chat_model(
-    model="llama-3.3-70b-versatile",
+    model="microsoft/phi-4-mini-reasoning",
     model_provider="openai",
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY")
+    base_url="http://127.0.0.1:1234/v1",
+    api_key="not-needed"
 )
-
-# ---------------- AGENT ----------------
 
 agent = create_agent(
     model=llm,
-    tools=[calculator, read_file, get_weather, knowledge_lookup],
+    tools=[
+        calculator,
+        read_uploaded_file,
+        current_weather,
+        knowledge_lookup
+    ],
     system_prompt=(
         "You are a helpful assistant. "
-        "Use tools only when required. "
-        "Otherwise answer directly."
+        "If the user asks to read or summarize a file, "
+        "use the read_uploaded_file tool."
     )
 )
 
-user_input = st.text_input("Ask something:")
+user_input = st.text_input("Enter your prompt:")
 
-if st.button("Send") and user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    log_event(f"User input received: {user_input}")
+if st.button("Run Agent") and user_input:
+    st.session_state.logs.clear()
+    st.session_state.logs.append(f"User input: {user_input}")
 
-    try:
-        result = agent.invoke({"messages": st.session_state.messages})
-        # Store the returned messages (LangChain objects)
-        st.session_state.messages = result["messages"]
-    except Exception as e:
-        log_event(f"Error calling agent: {str(e)}")
+    result = agent.invoke({
+        "messages": [{"role": "user", "content": user_input}]
+    })
 
-col1, col2 = st.columns(2)
+    st.session_state.messages = result["messages"]
 
-with col1:
-    st.subheader("💬 Chat")
+    # Manual logging
+    for msg in result["messages"]:
+        if msg.type == "tool":
+            st.session_state.logs.append(
+                f"Tool executed: {msg.name} | Output: {msg.content[:200]}"
+            )
+
+    st.subheader("🤖 AI Response")
+    st.write(result["messages"][-1].content)
+
+if st.session_state.messages:
+    st.subheader("📜 Message History")
     for msg in st.session_state.messages:
-        # Handle LangChain message objects
-        if hasattr(msg, "type") and hasattr(msg, "content"):
-            role = msg.type.upper()
-            content = msg.content
-        else:
-            role = msg.get("role", "UNKNOWN").upper()
-            content = msg.get("content", "")
-        st.markdown(f"**{role}:** {content}")
+        st.json({
+            "type": msg.type,
+            "name": getattr(msg, "name", None),
+            "content": msg.content
+        })
 
-with col2:
-    st.subheader("🧠 Tool & Agent Logs")
+if st.session_state.logs:
+    st.subheader("🪵 Execution Logs (Manual Middleware)")
     for log in st.session_state.logs:
-        st.code(log)
-
-st.subheader("📜 Raw Message History (Tool Flow)")
-st.json([
-    {
-        "role": getattr(m, "type", "UNKNOWN").upper(),
-        "content": getattr(m, "content", "")
-    }
-    for m in st.session_state.messages
-])
+        st.write(log)
